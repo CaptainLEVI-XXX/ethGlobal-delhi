@@ -93,6 +93,48 @@ contract MEVTaxHook is BaseHook {
         return this.beforeInitialize.selector;
     }
 
+    function _beforeSwap(address, PoolKey calldata key, IPoolManager.SwapParams calldata params, bytes calldata)
+        internal
+        override
+        returns (bytes4, BeforeSwapDelta, uint24)
+    {
+        PoolId poolId = key.toId();
+        PoolConfig memory config = poolConfig[poolId];
+        uint256 currentBlock = _getCurrentBlock();
+
+        // Only tax first swap per flashblock
+        if (currentBlock == lastTaxedBlock[poolId]) {
+            return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+        }
+
+        uint256 priorityFee = _getPriorityFee();
+        if (priorityFee < config.priorityThreshold) {
+            return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+        }
+
+        // Calculate MEV tax: (priorityFee - threshold) * feeUnit
+        uint256 swapTax;
+        unchecked {
+            swapTax = (priorityFee - config.priorityThreshold) * config.swapFeeUnit;
+        }
+
+        if (swapTax == 0) {
+            return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+        }
+
+        // Donate first (creates debt), then return delta to collect from user
+        if (config.taxCurrency == key.currency0) {
+            poolManager.donate(key, swapTax, 0, "");
+        } else {
+            poolManager.donate(key, 0, swapTax, "");
+        }
+
+        lastTaxedBlock[poolId] = currentBlock;
+
+        // Return delta based on tax currency and swap direction
+        return _getSwapTaxDelta(params, config.taxCurrency, key, swapTax);
+    }
+
     function _parseHookData(PoolKey calldata key, bytes calldata hookData, PoolConfig memory config) private pure {
         if (hookData.length >= 32) {
             // First 32 bytes: tax currency address
@@ -122,6 +164,43 @@ contract MEVTaxHook is BaseHook {
             // Next 32 bytes: priority threshold
             uint256 priorityThreshold = abi.decode(hookData[96:128], (uint256));
             config.priorityThreshold = priorityThreshold;
+        }
+    }
+
+    function _getCurrentBlock() private view returns (uint256) {
+        return address(flashBlockProvider) != address(0) ? flashBlockProvider.getFlashblockNumber() : block.number;
+    }
+
+    function _getSwapTaxDelta(
+        IPoolManager.SwapParams calldata params,
+        Currency taxCurrency,
+        PoolKey calldata key,
+        uint256 swapTax
+    ) private pure returns (bytes4, BeforeSwapDelta, uint24) {
+        if (params.zeroForOne) {
+            // User selling currency0
+            if (taxCurrency == key.currency0) {
+                // Tax same currency user is selling
+                return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(int128(uint128(swapTax)), 0), 0);
+            } else {
+                // Tax different currency (user buying)
+                return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(0, int128(uint128(swapTax))), 0);
+            }
+        } else {
+            // User selling currency1
+            if (taxCurrency == key.currency1) {
+                // Tax same currency user is selling
+                return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(0, int128(uint128(swapTax))), 0);
+            } else {
+                // Tax different currency (user buying)
+                return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(int128(uint128(swapTax)), 0), 0);
+            }
+        }
+    }
+
+    function _getPriorityFee() private view returns (uint256) {
+        unchecked {
+            return tx.gasprice - block.basefee;
         }
     }
 }
