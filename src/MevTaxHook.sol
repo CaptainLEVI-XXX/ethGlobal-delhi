@@ -135,6 +135,58 @@ contract MEVTaxHook is BaseHook {
         return _getSwapTaxDelta(params, config.taxCurrency, key, swapTax);
     }
 
+     function _afterAddLiquidity(
+        address,
+        PoolKey calldata key,
+        IPoolManager.ModifyLiquidityParams calldata,
+        BalanceDelta,
+        BalanceDelta,
+        bytes calldata
+    ) internal override returns (bytes4, BalanceDelta) {
+        PoolId poolId = key.toId();
+        PoolConfig memory config = poolConfig[poolId];
+        uint256 currentBlock = _getCurrentBlock();
+
+        // Only tax JIT liquidity (added at start of flashblock)
+        if (currentBlock == lastTaxedBlock[poolId]) {
+            return (this.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
+        }
+
+        uint256 priorityFee = _getPriorityFee();
+        if (priorityFee < config.priorityThreshold) {
+            return (this.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
+        }
+
+        // Calculate JIT tax: (priorityFee - threshold) * jitFeeUnit
+        uint256 jitTax;
+        unchecked {
+            jitTax = (priorityFee - config.priorityThreshold) * config.jitFeeUnit;
+        }
+
+        if (jitTax == 0) {
+            return (this.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
+        }
+
+        // Take tax from user and donate to existing LPs
+        poolManager.take(config.taxCurrency, address(this), jitTax);
+        
+        if (config.taxCurrency == key.currency0) {
+            poolManager.donate(key, jitTax, 0, "");
+        } else {
+            poolManager.donate(key, 0, jitTax, "");
+        }
+
+        lastTaxedBlock[poolId] = currentBlock;
+
+        // Return positive delta = user pays extra
+        if (config.taxCurrency == key.currency0) {
+            return (this.afterAddLiquidity.selector, toBalanceDelta(int128(uint128(jitTax)), 0));
+        } else {
+            return (this.afterAddLiquidity.selector, toBalanceDelta(0, int128(uint128(jitTax))));
+        }
+    }
+
+
     function _parseHookData(PoolKey calldata key, bytes calldata hookData, PoolConfig memory config) private pure {
         if (hookData.length >= 32) {
             // First 32 bytes: tax currency address
@@ -202,5 +254,27 @@ contract MEVTaxHook is BaseHook {
         unchecked {
             return tx.gasprice - block.basefee;
         }
+    }
+    function willBeTaxed(PoolKey calldata key) external view returns (
+        bool isTopOfBlock,
+        uint256 swapTax, 
+        uint256 jitTax,
+        Currency taxCurrency
+    ) {
+        PoolId poolId = key.toId();
+        PoolConfig memory config = poolConfig[poolId];
+        
+        isTopOfBlock = _getCurrentBlock() != lastTaxedBlock[poolId];
+        uint256 priorityFee = _getPriorityFee();
+        
+        if (isTopOfBlock && priorityFee >= config.priorityThreshold) {
+            unchecked {
+                uint256 excessFee = priorityFee - config.priorityThreshold;
+                swapTax = excessFee * config.swapFeeUnit;
+                jitTax = excessFee * config.jitFeeUnit;
+            }
+        }
+        
+        taxCurrency = config.taxCurrency;
     }
 }
