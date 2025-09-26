@@ -4,5 +4,8 @@
       "name": "v1.10.0",
       "rev": "8bbcf6e3f8f62f419e5429a0bd89331c85c37824"
     }
+  },
+  "lib/v4-periphery": {
+    "rev": "fdb5d3ea09d07eef380edf1a329140c98ff39dbb"
   }
 }
