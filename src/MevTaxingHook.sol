@@ -61,22 +61,8 @@ contract MEVTaxingHook is BaseHook {
         });
     }
 
-    function customizePoolConfig(PoolKey calldata key, bytes calldata hookData) external {
-        PoolId poolId = key.toId();
-
-        // Default configuration
-        PoolConfig memory config = PoolConfig({
-            taxCurrency: key.currency0,
-            swapFeeUnit: DEFAULT_SWAP_FEE_UNIT,
-            jitFeeUnit: DEFAULT_JIT_FEE_UNIT,
-            priorityThreshold: DEFAULT_PRIORITY_THRESHOLD
-        });
-
-        // Parse custom configuration from hookData if provided
-        if (hookData.length > 0) {
-            _parseHookData(key, hookData, config);
-        }
-
+    function setPoolConfig(PoolId poolId, PoolConfig memory config) external {
+        // Add access control as needed
         poolConfig[poolId] = config;
     }
 
@@ -186,38 +172,6 @@ contract MEVTaxingHook is BaseHook {
         }
     }
 
-    function _parseHookData(PoolKey calldata key, bytes calldata hookData, PoolConfig memory config) private pure {
-        if (hookData.length >= 32) {
-            // First 32 bytes: tax currency address
-            Currency specified = Currency.wrap(abi.decode(hookData[:32], (address)));
-            if (specified == key.currency0 || specified == key.currency1) {
-                config.taxCurrency = specified;
-            }
-        }
-
-        if (hookData.length >= 64) {
-            // Next 32 bytes: swap fee unit
-            uint256 swapFeeUnit = abi.decode(hookData[32:64], (uint256));
-            if (swapFeeUnit > 0) {
-                config.swapFeeUnit = swapFeeUnit;
-            }
-        }
-
-        if (hookData.length >= 96) {
-            // Next 32 bytes: jit fee unit
-            uint256 jitFeeUnit = abi.decode(hookData[64:96], (uint256));
-            if (jitFeeUnit > 0) {
-                config.jitFeeUnit = jitFeeUnit;
-            }
-        }
-
-        if (hookData.length >= 128) {
-            // Next 32 bytes: priority threshold
-            uint256 priorityThreshold = abi.decode(hookData[96:128], (uint256));
-            config.priorityThreshold = priorityThreshold;
-        }
-    }
-
     function _getCurrentBlock() private view returns (uint256) {
         return address(flashBlockProvider) != address(0) ? flashBlockProvider.getFlashblockNumber() : block.number;
     }
@@ -253,27 +207,5 @@ contract MEVTaxingHook is BaseHook {
         unchecked {
             return tx.gasprice - block.basefee;
         }
-    }
-
-    function willBeTaxed(PoolKey calldata key)
-        external
-        view
-        returns (bool isTopOfBlock, uint256 swapTax, uint256 jitTax, Currency taxCurrency)
-    {
-        PoolId poolId = key.toId();
-        PoolConfig memory config = poolConfig[poolId];
-
-        isTopOfBlock = _getCurrentBlock() != lastTaxedBlock[poolId];
-        uint256 priorityFee = _getPriorityFee();
-
-        if (isTopOfBlock && priorityFee >= config.priorityThreshold) {
-            unchecked {
-                uint256 excessFee = priorityFee - config.priorityThreshold;
-                swapTax = excessFee * config.swapFeeUnit;
-                jitTax = excessFee * config.jitFeeUnit;
-            }
-        }
-
-        taxCurrency = config.taxCurrency;
     }
 }
