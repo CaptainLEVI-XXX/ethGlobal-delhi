@@ -1,1 +1,3 @@
 solmate/=lib/v4-periphery/lib/v4-core/lib/solmate/src/
+pythnetwork/=lib/pyth-sdk-solidity/
+solady/=lib/solady/src/
