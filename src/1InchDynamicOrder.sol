@@ -4,15 +4,15 @@ pragma solidity ^0.8.0;
 import {IOrderMixin, IAmountGetter} from "./interfaces/IAmountGetter.sol";
 import {CustomRevert} from "v4-core/libraries/CustomRevert.sol";
 import {AddressLib, Address} from "./libraries/AddressLib.sol";
-import {FixedPointMathLib} from "solmate/src/utils/FixedPointMathLib.sol";
+import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 import {PythVolatilityLib} from "./PythVolatility.sol";
 import {Owned} from "solmate/src/auth/Owned.sol";
 
-abstract contract OneInchDynamicOrder is IAmountGetter, Owned {
+contract OneInchDynamicOrder is IAmountGetter, Owned {
     using CustomRevert for bytes4;
     using AddressLib for Address;
     using FixedPointMathLib for uint256;
-    using PythVolatilityLib for PythVolatilityLib.VolatilityStorge;
+    using PythVolatilityLib for PythVolatilityLib.VolatilityStorage;
 
     uint256 public constant BASIS_POINTS = 10000;
     uint256 public constant MAX_SPREAD = 1000;
@@ -27,17 +27,19 @@ abstract contract OneInchDynamicOrder is IAmountGetter, Owned {
     }
 
     address public admin;
-    PythVolatilityLib.VolatilityStorge internal _pythStorage;
+    PythVolatilityLib.VolatilityStorage internal _pythStorage;
 
-    constructor(address _admin) Owned(_admin) {}
+    constructor(address _admin, address _pythOracle) Owned(_admin) {
+        _pythStorage.setPythOracle(_pythOracle);
+    }
 
     function getTakingAmount(
         IOrderMixin.Order calldata order,
-        bytes calldata extension,
-        bytes32 orderHash,
-        address taker,
+        bytes calldata, /* extension */
+        bytes32, /* orderHash */
+        address, /* taker */
         uint256 makingAmount,
-        uint256 remainingMakingAmount,
+        uint256, /* remainingMakingAmount */
         bytes calldata extraData
     ) external view returns (uint256 takingAmount) {
         SpreadParams memory params = abi.decode(extraData, (SpreadParams));
@@ -54,18 +56,18 @@ abstract contract OneInchDynamicOrder is IAmountGetter, Owned {
                 _calculateDynamicSpread(params.baseSpreadBps, params.multiplier, params.maxSpreadBps, currentVolatility);
 
             // Apply spread to taking Amount
-            uint256 originalTakingAmount = makingAmount.mulDivDown(order.takingAmount, order.makingAmount);
-            takingAmount = originalTakingAmount + originalTakingAmount.mulDivDown(dynamicSpread, BASIS_POINTS);
+            uint256 originalTakingAmount = makingAmount.mulDiv(order.takingAmount, order.makingAmount);
+            takingAmount = originalTakingAmount.rawAdd(originalTakingAmount.mulDiv(dynamicSpread, BASIS_POINTS));
         }
     }
 
     function getMakingAmount(
         IOrderMixin.Order calldata order,
-        bytes calldata extension,
-        bytes32 orderHash,
-        address taker,
+        bytes calldata, /* extension */
+        bytes32, /* orderHash */
+        address, /* taker */
         uint256 takingAmount,
-        uint256 remainingTakingAmount,
+        uint256, /* remainingMakingAmount */
         bytes calldata extraData
     ) external view returns (uint256 makingAmount) {
         SpreadParams memory params = abi.decode(extraData, (SpreadParams));
@@ -82,8 +84,8 @@ abstract contract OneInchDynamicOrder is IAmountGetter, Owned {
                 _calculateDynamicSpread(params.baseSpreadBps, params.multiplier, params.maxSpreadBps, currentVolatility);
 
             // Apply spread to making amount
-            uint256 originalMakingAmount = takingAmount.mulDivDown(order.makingAmount, order.takingAmount);
-            makingAmount = originalMakingAmount + originalMakingAmount.mulDivDown(dynamicSpread, BASIS_POINTS);
+            uint256 originalMakingAmount = takingAmount.mulDiv(order.makingAmount, order.takingAmount);
+            makingAmount = originalMakingAmount.rawSub(originalMakingAmount.mulDiv(dynamicSpread, BASIS_POINTS));
         }
     }
 
@@ -97,12 +99,12 @@ abstract contract OneInchDynamicOrder is IAmountGetter, Owned {
         uint256 volatilityPct = currentVolatility / 100;
 
         // Calculate volatility impact
-        uint256 volatilityImpact = volatilityPct.mulDivDown(volatilityMultiplier, 100);
+        uint256 volatilityImpact = volatilityPct.mulDiv(volatilityMultiplier, 100);
         // Add to base spread
-        uint256 dynamicSpread = baseSpreadBps + volatilityImpact;
+        uint256 dynamicSpread = baseSpreadBps.rawAdd(volatilityImpact);
 
         // Cap at maximum spread
-        return min(dynamicSpread, maxSpreadBps);
+        return dynamicSpread.min(maxSpreadBps);
     }
 
     function previewSpread(
@@ -130,29 +132,17 @@ abstract contract OneInchDynamicOrder is IAmountGetter, Owned {
         return _pythStorage.getTokenVolatility(token);
     }
 
-    function previewVolatility(address token, uint8 volatilityWindow)
-        external
-        view
-        returns (uint256 currentVolatility)
-    {
-        return _pythStorage.previewVolatility(token, volatilityWindow);
-    }
-
     function updatePriceHistory(address[] calldata token) external {
         _pythStorage.updatePriceHistory(token);
     }
 
     function addTokenFeeds(
         address[] calldata tokens,
-        address[] calldata priceFeeds,
+        bytes32[] calldata priceFeeds,
         bool[] calldata isStablecoin,
         uint256[] calldata volatilityOverrides
     ) external {
         if (msg.sender != admin) RestrictedOperation.selector.revertWith();
         _pythStorage.setUpTokenFeeds(tokens, priceFeeds, isStablecoin, volatilityOverrides);
-    }
-
-    function min(uint256 a, uint256 b) internal view returns (uint256) {
-        return a < b ? a : b;
     }
 }
