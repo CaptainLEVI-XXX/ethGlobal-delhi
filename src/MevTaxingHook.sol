@@ -12,10 +12,13 @@ import {BalanceDelta, toBalanceDelta, BalanceDeltaLibrary} from "v4-core/types/B
 import {IFlashBlockNumber} from "./interfaces/IFlashBlock.sol";
 import {LPFeeLibrary} from "v4-core/libraries/LPFeeLibrary.sol";
 import {CustomRevert} from "v4-core/libraries/CustomRevert.sol";
+import {ILimitOrderProtocol} from "./interfaces/ILimitOrderProtocol.sol";
+import {Owned} from "solmate/src/auth/Owned.sol";
 
 // Taxe incoming assets on first swap per flashblock, donates all to LPs
 // Tax currency and fee units are configurable per pool during initialization
-contract MEVTaxingHook is BaseHook {
+// intended to be used with L2 Blockchain (OP stacks chain)
+contract MEVTaxingHookL2 is BaseHook {
     using PoolIdLibrary for PoolKey;
     using LPFeeLibrary for uint24;
     using CustomRevert for bytes4;
@@ -35,11 +38,20 @@ contract MEVTaxingHook is BaseHook {
     uint256 public constant DEFAULT_PRIORITY_THRESHOLD = 1 gwei;
 
     IFlashBlockNumber public immutable flashBlockProvider;
+    ILimitOrderProtocol public immutable limitOrderProtocol;
+    address public admin;
     mapping(PoolId => uint256) private lastTaxedBlock;
     mapping(PoolId => PoolConfig) public poolConfig;
 
-    constructor(IPoolManager _manager, IFlashBlockNumber _flashBlockProvider) BaseHook(_manager) {
+    constructor(
+        IPoolManager _manager,
+        IFlashBlockNumber _flashBlockProvider,
+        ILimitOrderProtocol _limitOrderProtocol,
+        address _owner
+    ) BaseHook(_manager) {
         flashBlockProvider = _flashBlockProvider;
+        limitOrderProtocol = _limitOrderProtocol;
+        admin = _owner;
     }
 
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
