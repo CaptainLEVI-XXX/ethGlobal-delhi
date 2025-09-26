@@ -2,7 +2,7 @@
 pragma solidity ^0.8.26;
 
 library PythVolatilityLib {
-    // struct VolatilityStorge {
-    //       uint256 volatility;
-    // }
+    struct VolatilityStorge {
+        uint256 volatility;
+    }
 }
