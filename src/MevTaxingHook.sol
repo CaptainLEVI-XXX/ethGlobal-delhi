@@ -15,7 +15,7 @@ import {CustomRevert} from "v4-core/libraries/CustomRevert.sol";
 
 // Taxe incoming assets on first swap per flashblock, donates all to LPs
 // Tax currency and fee units are configurable per pool during initialization
-contract MEVTaxHook is BaseHook {
+contract MEVTaxingHook is BaseHook {
     using PoolIdLibrary for PoolKey;
     using LPFeeLibrary for uint24;
     using CustomRevert for bytes4;
@@ -135,7 +135,7 @@ contract MEVTaxHook is BaseHook {
         return _getSwapTaxDelta(params, config.taxCurrency, key, swapTax);
     }
 
-     function _afterAddLiquidity(
+    function _afterAddLiquidity(
         address,
         PoolKey calldata key,
         IPoolManager.ModifyLiquidityParams calldata,
@@ -169,7 +169,7 @@ contract MEVTaxHook is BaseHook {
 
         // Take tax from user and donate to existing LPs
         poolManager.take(config.taxCurrency, address(this), jitTax);
-        
+
         if (config.taxCurrency == key.currency0) {
             poolManager.donate(key, jitTax, 0, "");
         } else {
@@ -185,7 +185,6 @@ contract MEVTaxHook is BaseHook {
             return (this.afterAddLiquidity.selector, toBalanceDelta(0, int128(uint128(jitTax))));
         }
     }
-
 
     function _parseHookData(PoolKey calldata key, bytes calldata hookData, PoolConfig memory config) private pure {
         if (hookData.length >= 32) {
@@ -255,18 +254,18 @@ contract MEVTaxHook is BaseHook {
             return tx.gasprice - block.basefee;
         }
     }
-    function willBeTaxed(PoolKey calldata key) external view returns (
-        bool isTopOfBlock,
-        uint256 swapTax, 
-        uint256 jitTax,
-        Currency taxCurrency
-    ) {
+
+    function willBeTaxed(PoolKey calldata key)
+        external
+        view
+        returns (bool isTopOfBlock, uint256 swapTax, uint256 jitTax, Currency taxCurrency)
+    {
         PoolId poolId = key.toId();
         PoolConfig memory config = poolConfig[poolId];
-        
+
         isTopOfBlock = _getCurrentBlock() != lastTaxedBlock[poolId];
         uint256 priorityFee = _getPriorityFee();
-        
+
         if (isTopOfBlock && priorityFee >= config.priorityThreshold) {
             unchecked {
                 uint256 excessFee = priorityFee - config.priorityThreshold;
@@ -274,7 +273,7 @@ contract MEVTaxHook is BaseHook {
                 jitTax = excessFee * config.jitFeeUnit;
             }
         }
-        
+
         taxCurrency = config.taxCurrency;
     }
 }
