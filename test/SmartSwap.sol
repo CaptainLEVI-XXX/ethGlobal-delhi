@@ -189,13 +189,7 @@ contract HybridRouterTest is OneInchHelper, Deployers {
 
         // Execute hybrid swap
         vm.prank(bob);
-        uint256 totalOutput = router.smartSwap(
-            6000 * 1e6,
-            0,
-            limitOrderData,
-            key,
-            v4params
-        );
+        uint256 totalOutput = router.smartSwap(6000 * 1e6, 0, limitOrderData, key, v4params);
 
         // Check results
         uint256 bobWethAfter = IERC20(WETH).balanceOf(bob);
@@ -216,14 +210,13 @@ contract HybridRouterTest is OneInchHelper, Deployers {
         // assertGt(totalOutput, 1.9 ether, "Should exceed minimum output");
         // assertLt(totalOutput, 2.1 ether, "Should be reasonable output");
     }
+
     function calculateV4Params(PoolKey memory poolKey, address tokenIn)
         internal
         pure
         returns (Router.V4SwapParams memory params)
     {
         params.zeroForOne = tokenIn == Currency.unwrap(poolKey.currency0);
-        params.sqrtPriceLimitX96 = params.zeroForOne
-            ? TickMath.MIN_SQRT_PRICE + 1
-            : TickMath.MAX_SQRT_PRICE - 1;
+        params.sqrtPriceLimitX96 = params.zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1;
     }
 }

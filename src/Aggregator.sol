@@ -185,5 +185,4 @@ contract Aggregator {
 
         return abi.encode(amountOut);
     }
-
 }
