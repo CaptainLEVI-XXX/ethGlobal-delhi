@@ -6,9 +6,8 @@ import {CustomRevert} from "v4-core/libraries/CustomRevert.sol";
 import {AddressLib, Address} from "./libraries/AddressLib.sol";
 import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 import {PythVolatilityLib} from "./PythVolatility.sol";
-import {Owned} from "solmate/src/auth/Owned.sol";
 
-contract OneInchDynamicOrder is IAmountGetter, Owned {
+contract OneInchDynamicOrder is IAmountGetter {
     using CustomRevert for bytes4;
     using AddressLib for Address;
     using FixedPointMathLib for uint256;
@@ -29,8 +28,9 @@ contract OneInchDynamicOrder is IAmountGetter, Owned {
     address public admin;
     PythVolatilityLib.VolatilityStorage internal _pythStorage;
 
-    constructor(address _admin, address _pythOracle) Owned(_admin) {
+    constructor(address _admin, address _pythOracle) {
         _pythStorage.setPythOracle(_pythOracle);
+        admin = _admin;
     }
 
     function getTakingAmount(
