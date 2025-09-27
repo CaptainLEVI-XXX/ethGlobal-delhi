@@ -47,7 +47,7 @@ contract Router {
      * @param poolKey v4 pool for remaining swap
      * @return totalAmountOut Total output received
      */
-    function hybridSwap(
+    function smartSwap(
         address tokenIn,
         address tokenOut,
         uint256 totalAmountIn,
