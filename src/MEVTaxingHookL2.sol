@@ -12,8 +12,7 @@ import {BalanceDelta, toBalanceDelta, BalanceDeltaLibrary} from "v4-core/types/B
 import {IFlashBlockNumber} from "./interfaces/IFlashBlock.sol";
 import {LPFeeLibrary} from "v4-core/libraries/LPFeeLibrary.sol";
 import {CustomRevert} from "v4-core/libraries/CustomRevert.sol";
-import {ILimitOrderProtocol} from "./interfaces/ILimitOrderProtocol.sol";
-import {Owned} from "solmate/src/auth/Owned.sol";
+import {console} from "forge-std/console.sol";
 
 // Taxe incoming assets on first swap per flashblock, donates all to LPs
 // Tax currency and fee units are configurable per pool during initialization
@@ -24,6 +23,7 @@ contract MEVTaxingHookL2 is BaseHook {
     using CustomRevert for bytes4;
 
     error DynamicFeeNotEnabled();
+    error Unauthorized();
 
     struct PoolConfig {
         Currency taxCurrency; // Which currency to collect taxes in
@@ -33,25 +33,21 @@ contract MEVTaxingHookL2 is BaseHook {
     }
 
     // Default configuration values
-    uint256 public constant DEFAULT_SWAP_FEE_UNIT = 1000 wei;
-    uint256 public constant DEFAULT_JIT_FEE_UNIT = 4000 wei; // 4x higher for JIT
-    uint256 public constant DEFAULT_PRIORITY_THRESHOLD = 1 gwei;
+    /// @notice these params need to be battled tested
+    uint256 public constant DEFAULT_SWAP_FEE_UNIT = 1 wei;
+    uint256 public constant DEFAULT_JIT_FEE_UNIT = 4 wei; // 4x higher for JIT
+    uint256 public constant DEFAULT_PRIORITY_THRESHOLD = 10 wei;
 
     IFlashBlockNumber public immutable flashBlockProvider;
-    ILimitOrderProtocol public immutable limitOrderProtocol;
     address public admin;
-    mapping(PoolId => uint256) private lastTaxedBlock;
+    // mapping(PoolId => uint256) private lastTaxedBlock;
+    // Track only when SWAPS are taxed (indicates "top of block" activity)
+    mapping(PoolId => uint256) private lastSwapTaxedBlock;
     mapping(PoolId => PoolConfig) public poolConfig;
 
-    constructor(
-        IPoolManager _manager,
-        IFlashBlockNumber _flashBlockProvider,
-        ILimitOrderProtocol _limitOrderProtocol,
-        address _owner
-    ) BaseHook(_manager) {
+    constructor(IPoolManager _manager, IFlashBlockNumber _flashBlockProvider, address _admin) BaseHook(_manager) {
         flashBlockProvider = _flashBlockProvider;
-        limitOrderProtocol = _limitOrderProtocol;
-        admin = _owner;
+        admin = _admin;
     }
 
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
@@ -74,7 +70,7 @@ contract MEVTaxingHookL2 is BaseHook {
     }
 
     function setPoolConfig(PoolId poolId, PoolConfig memory config) external {
-        // Add access control as needed
+        if (msg.sender != admin) Unauthorized.selector.revertWith();
         poolConfig[poolId] = config;
     }
 
@@ -91,7 +87,7 @@ contract MEVTaxingHookL2 is BaseHook {
         return this.beforeInitialize.selector;
     }
 
-    function _beforeSwap(address, PoolKey calldata key, IPoolManager.SwapParams calldata params, bytes calldata)
+    function _beforeSwap(address, PoolKey calldata key, IPoolManager.SwapParams calldata, bytes calldata)
         internal
         override
         returns (bytes4, BeforeSwapDelta, uint24)
@@ -99,38 +95,30 @@ contract MEVTaxingHookL2 is BaseHook {
         PoolId poolId = key.toId();
         PoolConfig memory config = poolConfig[poolId];
         uint256 currentBlock = _getCurrentBlock();
+        uint256 priorityFee = _getPriorityFee();
 
         // Only tax first swap per flashblock
-        if (currentBlock == lastTaxedBlock[poolId]) {
+        if (currentBlock == lastSwapTaxedBlock[poolId] || priorityFee < config.priorityThreshold) {
             return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
         }
 
-        uint256 priorityFee = _getPriorityFee();
-        if (priorityFee < config.priorityThreshold) {
-            return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+        // Calculate and apply swap tax
+        uint256 swapTax = (priorityFee - config.priorityThreshold) * config.swapFeeUnit;
+
+        if (swapTax > 0) {
+            // Donate and collect tax
+            if (config.taxCurrency == key.currency0) {
+                poolManager.donate(key, swapTax, 0, "");
+                lastSwapTaxedBlock[poolId] = currentBlock; // Only update for swaps!
+                return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(int128(int256(swapTax)), 0), 0);
+            } else {
+                poolManager.donate(key, 0, swapTax, "");
+                lastSwapTaxedBlock[poolId] = currentBlock; // Only update for swaps!
+                return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(0, int128(int256(swapTax))), 0);
+            }
         }
 
-        // Calculate MEV tax: (priorityFee - threshold) * feeUnit
-        uint256 swapTax;
-        unchecked {
-            swapTax = (priorityFee - config.priorityThreshold) * config.swapFeeUnit;
-        }
-
-        if (swapTax == 0) {
-            return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
-        }
-
-        // Donate first (creates debt), then return delta to collect from user
-        if (config.taxCurrency == key.currency0) {
-            poolManager.donate(key, swapTax, 0, "");
-        } else {
-            poolManager.donate(key, 0, swapTax, "");
-        }
-
-        lastTaxedBlock[poolId] = currentBlock;
-
-        // Return delta based on tax currency and swap direction
-        return _getSwapTaxDelta(params, config.taxCurrency, key, swapTax);
+        return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }
 
     function _afterAddLiquidity(
@@ -145,8 +133,10 @@ contract MEVTaxingHookL2 is BaseHook {
         PoolConfig memory config = poolConfig[poolId];
         uint256 currentBlock = _getCurrentBlock();
 
-        // Only tax JIT liquidity (added at start of flashblock)
-        if (currentBlock == lastTaxedBlock[poolId]) {
+        // Tax JIT liquidity ONLY if no swap has been taxed yet in this block
+        // (meaning this liquidity is being added at the "top" of the block)
+        if (currentBlock == lastSwapTaxedBlock[poolId]) {
+            // A swap already happened in this block - this is normal liquidity, not JIT
             return (this.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
         }
 
@@ -155,64 +145,28 @@ contract MEVTaxingHookL2 is BaseHook {
             return (this.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
         }
 
-        // Calculate JIT tax: (priorityFee - threshold) * jitFeeUnit
-        uint256 jitTax;
-        unchecked {
-            jitTax = (priorityFee - config.priorityThreshold) * config.jitFeeUnit;
+        // Calculate JIT tax (4x higher than swap tax)
+        uint256 jitTax = (priorityFee - config.priorityThreshold) * config.jitFeeUnit;
+
+        if (jitTax > 0) {
+            // return the delta - PoolManager handles collection
+
+            // Send tax to admin
+            poolManager.take(config.taxCurrency, admin, jitTax);
+
+            // Return positive delta = LP must pay extra
+            if (config.taxCurrency == key.currency0) {
+                return (this.afterAddLiquidity.selector, toBalanceDelta(int128(uint128(jitTax)), 0));
+            } else {
+                return (this.afterAddLiquidity.selector, toBalanceDelta(0, int128(uint128(jitTax))));
+            }
         }
 
-        if (jitTax == 0) {
-            return (this.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
-        }
-
-        // Take tax from user and donate to existing LPs
-        poolManager.take(config.taxCurrency, address(this), jitTax);
-
-        if (config.taxCurrency == key.currency0) {
-            poolManager.donate(key, jitTax, 0, "");
-        } else {
-            poolManager.donate(key, 0, jitTax, "");
-        }
-
-        lastTaxedBlock[poolId] = currentBlock;
-
-        // Return positive delta = user pays extra
-        if (config.taxCurrency == key.currency0) {
-            return (this.afterAddLiquidity.selector, toBalanceDelta(int128(uint128(jitTax)), 0));
-        } else {
-            return (this.afterAddLiquidity.selector, toBalanceDelta(0, int128(uint128(jitTax))));
-        }
+        return (this.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
     }
 
     function _getCurrentBlock() private view returns (uint256) {
         return address(flashBlockProvider) != address(0) ? flashBlockProvider.getFlashblockNumber() : block.number;
-    }
-
-    function _getSwapTaxDelta(
-        IPoolManager.SwapParams calldata params,
-        Currency taxCurrency,
-        PoolKey calldata key,
-        uint256 swapTax
-    ) private pure returns (bytes4, BeforeSwapDelta, uint24) {
-        if (params.zeroForOne) {
-            // User selling currency0
-            if (taxCurrency == key.currency0) {
-                // Tax same currency user is selling
-                return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(int128(uint128(swapTax)), 0), 0);
-            } else {
-                // Tax different currency (user buying)
-                return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(0, int128(uint128(swapTax))), 0);
-            }
-        } else {
-            // User selling currency1
-            if (taxCurrency == key.currency1) {
-                // Tax same currency user is selling
-                return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(0, int128(uint128(swapTax))), 0);
-            } else {
-                // Tax different currency (user buying)
-                return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(int128(uint128(swapTax)), 0), 0);
-            }
-        }
     }
 
     function _getPriorityFee() private view returns (uint256) {
