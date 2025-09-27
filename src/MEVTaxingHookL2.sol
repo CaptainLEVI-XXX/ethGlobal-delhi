@@ -145,7 +145,7 @@ contract MEVTaxingHookL2 is BaseHook {
             return (this.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
         }
 
-        // Calculate JIT tax (4x higher than swap tax)
+        // Calculate JIT tax (ax higher than swap tax)
         uint256 jitTax = (priorityFee - config.priorityThreshold) * config.jitFeeUnit;
 
         if (jitTax > 0) {
