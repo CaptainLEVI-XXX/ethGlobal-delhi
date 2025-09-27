@@ -125,53 +125,6 @@ contract MEVTaxingHookTest is Test, Deployers {
         assertApproxEqAbs(token1.balanceOf(alice.addr), 1 ether, 0.1 ether);
     }
 
-    function test_debugTaxingLogic() public {
-        // Setup
-        deal(Currency.unwrap(token0), alice.addr, 2 ether);
-        vm.prank(alice.addr);
-        MockERC20(Currency.unwrap(token0)).approve(address(swapRouter), 2 ether);
-
-        // Set flashblock
-        flashBlockProvider.setFlashBlockNumber(123);
-
-        // Verify flashblock is set
-        console.log("Flashblock number:", flashBlockProvider.getFlashblockNumber());
-        console.log("Block number:", block.number);
-
-        // Set high priority fee
-        uint256 baseFee = 1 gwei;
-        uint256 priorityFee = 10 gwei;
-        vm.fee(baseFee);
-        vm.txGasPrice(baseFee + priorityFee);
-
-        console.log("tx.gasprice:", tx.gasprice);
-        console.log("block.basefee:", block.basefee);
-        console.log("Priority fee (calculated):", tx.gasprice - block.basefee);
-        console.log("Threshold:", hook.DEFAULT_PRIORITY_THRESHOLD());
-
-        uint256 poolBalanceBefore = token0.balanceOf(address(manager));
-
-        vm.prank(alice.addr);
-        swapRouter.swap(
-            key,
-            IPoolManager.SwapParams({
-                zeroForOne: true,
-                amountSpecified: -1 ether,
-                sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
-            }),
-            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
-            ""
-        );
-
-        uint256 poolBalanceAfter = token0.balanceOf(address(manager));
-        uint256 actualIncrease = poolBalanceAfter - poolBalanceBefore;
-        uint256 expectedTax = (priorityFee) * hook.DEFAULT_SWAP_FEE_UNIT();
-
-        console.log("Pool balance increase:", actualIncrease);
-        console.log("Expected (swap + tax):", 1 ether + expectedTax);
-        console.log("Tax collected:", actualIncrease > 1 ether ? actualIncrease - 1 ether : 0);
-    }
-
     function test_highPrioritySwap_withRealisticTax() public {
         deal(Currency.unwrap(token0), alice.addr, 1 ether); // Extra for tax
 
